@@ -9,6 +9,12 @@ on:
     paths:
       - 'source/**'
       - '.github/workflows/build-apk.yml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'source/**'
+      - '.github/workflows/build-apk.yml'
 
 permissions:
   contents: read
