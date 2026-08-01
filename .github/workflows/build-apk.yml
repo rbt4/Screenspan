@@ -19,7 +19,7 @@ on:
       - '.github/workflows/build-apk.yml'
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -83,3 +83,27 @@ jobs:
             ScreenSpan-v0.1.0-test.apk.sha256
           if-no-files-found: error
           retention-days: 30
+
+      - name: Publish stable test download
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view v0.1.0-test --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload v0.1.0-test \
+              ScreenSpan-v0.1.0-test.apk \
+              ScreenSpan-v0.1.0-test.apk.sha256 \
+              --clobber \
+              --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create v0.1.0-test \
+              ScreenSpan-v0.1.0-test.apk \
+              ScreenSpan-v0.1.0-test.apk.sha256 \
+              --target "$GITHUB_SHA" \
+              --title 'ScreenSpan v0.1.0 Test' \
+              --notes 'First Chromecast with Google TV prototype. Disable projector auto-keystone before calibration. Use only media you are authorized to access.' \
+              --prerelease \
+              --repo "$GITHUB_REPOSITORY"
+          fi
