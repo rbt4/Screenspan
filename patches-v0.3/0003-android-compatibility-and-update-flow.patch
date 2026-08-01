@@ -1,0 +1,281 @@
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index f96bec0..f97c9b0 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -13,13 +13,14 @@
+ 
+     <uses-feature android:name="android.software.leanback" android:required="false" />
+     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
++    <uses-feature android:name="android.hardware.wifi" android:required="false" />
+     <uses-feature android:glEsVersion="0x00020000" android:required="true" />
+ 
+     <application
+-        android:allowBackup="true"
++        android:allowBackup="false"
+         android:banner="@drawable/tv_banner"
+         android:icon="@drawable/ic_screenspan"
+-        android:label="ScreenSpan"
++        android:label="@string/app_name"
+         android:networkSecurityConfig="@xml/network_security_config"
+         android:supportsRtl="true"
+         android:theme="@style/Theme.ScreenSpan">
+@@ -28,8 +29,7 @@
+             android:name=".TvActivity"
+             android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenLayout|screenSize|smallestScreenSize|uiMode"
+             android:exported="true"
+-            android:launchMode="singleTask"
+-            android:screenOrientation="landscape">
++            android:launchMode="singleTask">
+             <intent-filter>
+                 <action android:name="android.intent.action.MAIN" />
+                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+@@ -39,8 +39,7 @@
+         <activity
+             android:name=".PhoneActivity"
+             android:exported="true"
+-            android:launchMode="singleTask"
+-            android:screenOrientation="unspecified">
++            android:launchMode="singleTask">
+             <intent-filter>
+                 <action android:name="android.intent.action.MAIN" />
+                 <category android:name="android.intent.category.LAUNCHER" />
+@@ -61,7 +60,7 @@
+             <intent-filter>
+                 <action android:name="android.intent.action.VIEW" />
+                 <category android:name="android.intent.category.DEFAULT" />
+-                <data android:mimeType="application/x-mpegURL" />
++                <data android:mimeType="application/x-mpegurl" />
+                 <data android:mimeType="application/vnd.apple.mpegurl" />
+                 <data android:mimeType="application/dash+xml" />
+             </intent-filter>
+diff --git a/app/src/main/java/com/rbt4/screenspan/CalibrationReviewView.java b/app/src/main/java/com/rbt4/screenspan/CalibrationReviewView.java
+index fd03078..835052b 100644
+--- a/app/src/main/java/com/rbt4/screenspan/CalibrationReviewView.java
++++ b/app/src/main/java/com/rbt4/screenspan/CalibrationReviewView.java
+@@ -16,9 +16,12 @@ import java.util.Comparator;
+ import java.util.List;
+ 
+ public final class CalibrationReviewView extends View {
++    private static final int[] MARKER_COLORS = {0xffff00e6, 0xff00e5ff, 0xffffd900, 0xff25ff55};
++
+     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+     private final Matrix imageMatrix = new Matrix();
+     private final Matrix inverseMatrix = new Matrix();
++    private final Path outlinePath = new Path();
+     private Bitmap bitmap;
+     private PointF[] markers = new PointF[4];
+     private final List<PointF> corners = new ArrayList<>();
+@@ -77,7 +80,7 @@ public final class CalibrationReviewView extends View {
+         for (int i = 0; i < markers.length; i++) {
+             PointF marker = markers[i];
+             if (marker == null) continue;
+-            paint.setColor(new int[]{0xffff00e6, 0xff00e5ff, 0xffffd900, 0xff25ff55}[i]);
++            paint.setColor(MARKER_COLORS[i]);
+             canvas.drawCircle(marker.x, marker.y, 14f / scale, paint);
+             paint.setStyle(Paint.Style.STROKE);
+             paint.setStrokeWidth(4f / scale);
+@@ -87,14 +90,14 @@ public final class CalibrationReviewView extends View {
+         }
+ 
+         if (!corners.isEmpty()) {
+-            Path path = new Path();
+-            path.moveTo(corners.get(0).x, corners.get(0).y);
+-            for (int i = 1; i < corners.size(); i++) path.lineTo(corners.get(i).x, corners.get(i).y);
+-            if (corners.size() == 4) path.close();
++            outlinePath.reset();
++            outlinePath.moveTo(corners.get(0).x, corners.get(0).y);
++            for (int i = 1; i < corners.size(); i++) outlinePath.lineTo(corners.get(i).x, corners.get(i).y);
++            if (corners.size() == 4) outlinePath.close();
+             paint.setStyle(Paint.Style.STROKE);
+             paint.setStrokeWidth(7f / scale);
+             paint.setColor(0xffff4038);
+-            canvas.drawPath(path, paint);
++            canvas.drawPath(outlinePath, paint);
+             paint.setStyle(Paint.Style.FILL);
+             for (int i = 0; i < corners.size(); i++) {
+                 PointF p = corners.get(i);
+@@ -132,13 +135,23 @@ public final class CalibrationReviewView extends View {
+             changed();
+             return true;
+         }
+-        if (event.getActionMasked() == MotionEvent.ACTION_UP || event.getActionMasked() == MotionEvent.ACTION_CANCEL) {
++        if (event.getActionMasked() == MotionEvent.ACTION_UP) {
++            dragging = -1;
++            performClick();
++            return true;
++        }
++        if (event.getActionMasked() == MotionEvent.ACTION_CANCEL) {
+             dragging = -1;
+             return true;
+         }
+         return true;
+     }
+ 
++    @Override public boolean performClick() {
++        super.performClick();
++        return true;
++    }
++
+     private int nearestCorner(PointF point) {
+         int best = 0;
+         double bestDistance = Double.MAX_VALUE;
+diff --git a/app/src/main/java/com/rbt4/screenspan/HttpCommandClient.java b/app/src/main/java/com/rbt4/screenspan/HttpCommandClient.java
+index 342bc39..80b63f7 100644
+--- a/app/src/main/java/com/rbt4/screenspan/HttpCommandClient.java
++++ b/app/src/main/java/com/rbt4/screenspan/HttpCommandClient.java
+@@ -2,6 +2,7 @@ package com.rbt4.screenspan;
+ 
+ import java.io.BufferedReader;
+ import java.io.InputStreamReader;
++import java.io.UnsupportedEncodingException;
+ import java.net.HttpURLConnection;
+ import java.net.URI;
+ import java.net.URLEncoder;
+@@ -28,6 +29,10 @@ public final class HttpCommandClient {
+     }
+ 
+     public static String encode(String value) {
+-        return URLEncoder.encode(value, StandardCharsets.UTF_8);
++        try {
++            return URLEncoder.encode(value, StandardCharsets.UTF_8.name());
++        } catch (UnsupportedEncodingException impossible) {
++            throw new AssertionError(impossible);
++        }
+     }
+ }
+diff --git a/app/src/main/java/com/rbt4/screenspan/PhoneActivity.java b/app/src/main/java/com/rbt4/screenspan/PhoneActivity.java
+index c944045..ae77331 100644
+--- a/app/src/main/java/com/rbt4/screenspan/PhoneActivity.java
++++ b/app/src/main/java/com/rbt4/screenspan/PhoneActivity.java
+@@ -328,16 +328,27 @@ public final class PhoneActivity extends Activity implements NsdLink.Listener {
+             updater.check(true);
+             return;
+         }
+-        if (tvEndpoint != null) {
+-            worker.execute(() -> {
+-                try {
+-                    HttpCommandClient.get(tvEndpoint, "/update");
+-                } catch (Exception e) {
+-                    runOnUiThread(() -> setStatus("Phone update can continue, but TV update did not start: " + e.getMessage()));
+-                }
+-            });
++        updateButton.setEnabled(false);
++        if (tvEndpoint == null) {
++            setStatus("Chromecast is not connected, so this will update the phone only. Open ScreenSpan on TV and update it afterward.");
++            updater.installLatest();
++            return;
+         }
+-        updater.installLatest();
++        setStatus("Starting the Chromecast update first…");
++        worker.execute(() -> {
++            String tvResult;
++            try {
++                HttpCommandClient.get(tvEndpoint, "/update");
++                tvResult = "Chromecast update started. Confirm Install on the TV when prompted; the phone update is starting now.";
++            } catch (Exception e) {
++                tvResult = "Chromecast update did not start (" + e.getMessage() + "). The phone update can still continue.";
++            }
++            String finalTvResult = tvResult;
++            runOnUiThread(() -> {
++                setStatus(finalTvResult);
++                updater.installLatest();
++            });
++        });
+     }
+ 
+     private void onUpdateState(boolean available, String message) {
+diff --git a/app/src/main/java/com/rbt4/screenspan/ProjectionSurfaceView.java b/app/src/main/java/com/rbt4/screenspan/ProjectionSurfaceView.java
+index 9f5bf79..24fbc9a 100644
+--- a/app/src/main/java/com/rbt4/screenspan/ProjectionSurfaceView.java
++++ b/app/src/main/java/com/rbt4/screenspan/ProjectionSurfaceView.java
+@@ -1,9 +1,11 @@
+ package com.rbt4.screenspan;
+ 
++import android.annotation.SuppressLint;
+ import android.content.Context;
+ import android.opengl.GLSurfaceView;
+ import android.view.Surface;
+ 
++@SuppressLint("ViewConstructor")
+ public final class ProjectionSurfaceView extends GLSurfaceView {
+     public interface SurfaceListener {
+         void onVideoSurfaceReady(Surface surface);
+diff --git a/app/src/main/java/com/rbt4/screenspan/ScreenSpanHttpServer.java b/app/src/main/java/com/rbt4/screenspan/ScreenSpanHttpServer.java
+index af53620..a063531 100644
+--- a/app/src/main/java/com/rbt4/screenspan/ScreenSpanHttpServer.java
++++ b/app/src/main/java/com/rbt4/screenspan/ScreenSpanHttpServer.java
+@@ -6,6 +6,7 @@ import java.io.BufferedReader;
+ import java.io.IOException;
+ import java.io.InputStreamReader;
+ import java.io.OutputStream;
++import java.io.UnsupportedEncodingException;
+ import java.net.ServerSocket;
+ import java.net.Socket;
+ import java.net.URLDecoder;
+@@ -192,8 +193,9 @@ public final class ScreenSpanHttpServer {
+     }
+ 
+     private static String decode(String value) {
+-        try { return URLDecoder.decode(value, StandardCharsets.UTF_8); }
+-        catch (Exception ignored) { return value; }
++        try { return URLDecoder.decode(value, StandardCharsets.UTF_8.name()); }
++        catch (UnsupportedEncodingException impossible) { throw new AssertionError(impossible); }
++        catch (IllegalArgumentException malformed) { return value; }
+     }
+ 
+     private static float[] parseQuad(String raw) {
+diff --git a/app/src/main/java/com/rbt4/screenspan/UpdateResultReceiver.java b/app/src/main/java/com/rbt4/screenspan/UpdateResultReceiver.java
+index dbd91dc..b48e934 100644
+--- a/app/src/main/java/com/rbt4/screenspan/UpdateResultReceiver.java
++++ b/app/src/main/java/com/rbt4/screenspan/UpdateResultReceiver.java
+@@ -4,6 +4,7 @@ import android.content.BroadcastReceiver;
+ import android.content.Context;
+ import android.content.Intent;
+ import android.content.pm.PackageInstaller;
++import android.os.Build;
+ import android.widget.Toast;
+ 
+ public final class UpdateResultReceiver extends BroadcastReceiver {
+@@ -12,10 +13,16 @@ public final class UpdateResultReceiver extends BroadcastReceiver {
+     @Override public void onReceive(Context context, Intent intent) {
+         int status = intent.getIntExtra(PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE);
+         if (status == PackageInstaller.STATUS_PENDING_USER_ACTION) {
+-            Intent confirmation = intent.getParcelableExtra(Intent.EXTRA_INTENT);
++            Intent confirmation = Build.VERSION.SDK_INT >= 33
++                    ? intent.getParcelableExtra(Intent.EXTRA_INTENT, Intent.class)
++                    : intent.getParcelableExtra(Intent.EXTRA_INTENT);
+             if (confirmation != null) {
+                 confirmation.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+-                context.startActivity(confirmation);
++                try {
++                    context.startActivity(confirmation);
++                } catch (RuntimeException blocked) {
++                    Toast.makeText(context, "Open ScreenSpan to confirm the update", Toast.LENGTH_LONG).show();
++                }
+             }
+             return;
+         }
+@@ -23,7 +30,11 @@ public final class UpdateResultReceiver extends BroadcastReceiver {
+             Intent launch = context.getPackageManager().getLaunchIntentForPackage(context.getPackageName());
+             if (launch != null) {
+                 launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+-                context.startActivity(launch);
++                try {
++                    context.startActivity(launch);
++                } catch (RuntimeException ignored) {
++                    Toast.makeText(context, "ScreenSpan updated. Reopen the app.", Toast.LENGTH_LONG).show();
++                }
+             }
+             return;
+         }
+diff --git a/app/src/main/res/values/styles.xml b/app/src/main/res/values/styles.xml
+index 8c23b17..7b0fb63 100644
+--- a/app/src/main/res/values/styles.xml
++++ b/app/src/main/res/values/styles.xml
+@@ -6,6 +6,5 @@
+         <item name="android:windowNoTitle">true</item>
+         <item name="android:windowFullscreen">true</item>
+         <item name="android:navigationBarColor">#000000</item>
+-        <item name="android:windowLightNavigationBar">false</item>
+     </style>
+ </resources>
