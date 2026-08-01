@@ -1,0 +1,287 @@
+diff --git a/app/src/main/java/com/rbt4/screenspan/StreamRelayServer.java b/app/src/main/java/com/rbt4/screenspan/StreamRelayServer.java
+index 359072f..8e1d221 100644
+--- a/app/src/main/java/com/rbt4/screenspan/StreamRelayServer.java
++++ b/app/src/main/java/com/rbt4/screenspan/StreamRelayServer.java
+@@ -1,6 +1,7 @@
+ package com.rbt4.screenspan;
+ 
+ import android.net.Uri;
++import android.util.Base64;
+ 
+ import java.io.BufferedInputStream;
+ import java.io.BufferedOutputStream;
+@@ -14,10 +15,9 @@ import java.net.HttpURLConnection;
+ import java.net.ServerSocket;
+ import java.net.Socket;
+ import java.net.URI;
+-import java.net.URLDecoder;
+-import java.net.URLEncoder;
+ import java.nio.charset.StandardCharsets;
+-import java.util.HashMap;
++import java.security.SecureRandom;
++import java.util.LinkedHashMap;
+ import java.util.Locale;
+ import java.util.Map;
+ import java.util.concurrent.ExecutorService;
+@@ -27,9 +27,16 @@ import java.util.regex.Pattern;
+ 
+ public final class StreamRelayServer {
+     private static final Pattern URI_ATTRIBUTE = Pattern.compile("URI=\"([^\"]+)\"");
++    private static final int MAX_ALLOWED_URLS = 8192;
+ 
+     private final int port;
+     private final ExecutorService clients = Executors.newCachedThreadPool();
++    private final SecureRandom random = new SecureRandom();
++    private final Map<String, URI> allowedUrls = new LinkedHashMap<>(64, .75f, true) {
++        @Override protected boolean removeEldestEntry(Map.Entry<String, URI> eldest) {
++            return size() > MAX_ALLOWED_URLS;
++        }
++    };
+     private volatile boolean running;
+     private ServerSocket server;
+     private Thread acceptThread;
+@@ -41,6 +48,7 @@ public final class StreamRelayServer {
+     public void start() throws IOException {
+         if (running) return;
+         server = new ServerSocket(port);
++        server.setReuseAddress(true);
+         running = true;
+         acceptThread = new Thread(() -> {
+             while (running) {
+@@ -59,106 +67,121 @@ public final class StreamRelayServer {
+         running = false;
+         try { if (server != null) server.close(); } catch (IOException ignored) {}
+         clients.shutdownNow();
++        synchronized (allowedUrls) { allowedUrls.clear(); }
+     }
+ 
+     public String relayUrl(Uri source) {
+         String ip = NetworkUtils.localIpv4();
+-        if (ip == null) throw new IllegalStateException("Phone is not connected to local Wi-Fi");
+-        return "http://" + ip + ":" + port + "/fetch?u=" + URLEncoder.encode(source.toString(), StandardCharsets.UTF_8);
++        if (ip == null) throw new IllegalStateException("Phone is not connected to the same local network");
++        URI uri = URI.create(source.toString());
++        ensureHttp(uri);
++        return relayBase(ip) + register(uri);
+     }
+ 
+     private void handle(Socket socket) {
+         try (socket;
+              BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.ISO_8859_1));
+              OutputStream rawOutput = new BufferedOutputStream(socket.getOutputStream())) {
++            socket.setSoTimeout(10_000);
+             String request = reader.readLine();
+-            if (request == null) return;
++            if (request == null || request.length() > 8192) return;
+             String[] requestParts = request.split(" ");
+             if (requestParts.length < 2) return;
+             String method = requestParts[0].toUpperCase(Locale.ROOT);
++            if (!"GET".equals(method) && !"HEAD".equals(method)) {
++                sendError(rawOutput, 405, "Only GET and HEAD are allowed");
++                return;
++            }
+             String target = requestParts[1];
+-            Map<String, String> headers = new HashMap<>();
++            Map<String, String> headers = new LinkedHashMap<>();
++            int totalHeaderLength = 0;
+             String line;
+             while ((line = reader.readLine()) != null && !line.isEmpty()) {
++                totalHeaderLength += line.length();
++                if (line.length() > 8192 || totalHeaderLength > 32 * 1024) {
++                    sendError(rawOutput, 431, "Request headers were too large");
++                    return;
++                }
+                 int colon = line.indexOf(':');
+                 if (colon > 0) headers.put(line.substring(0, colon).trim().toLowerCase(Locale.ROOT), line.substring(colon + 1).trim());
+             }
+-            String encoded = queryValue(target, "u");
+-            if (encoded == null) {
+-                sendError(rawOutput, 400, "Missing relay target");
++            String id = queryValue(target, "id");
++            URI upstreamUri = id == null ? null : lookup(id);
++            if (upstreamUri == null) {
++                sendError(rawOutput, 403, "Relay link is invalid or expired");
+                 return;
+             }
+-            String upstreamUrl = URLDecoder.decode(encoded, StandardCharsets.UTF_8);
+-            proxy(method, upstreamUrl, headers, rawOutput);
++            proxy(method, upstreamUri, headers, rawOutput);
+         } catch (Exception ignored) {}
+     }
+ 
+-    private void proxy(String method, String target, Map<String, String> requestHeaders, OutputStream output) throws Exception {
+-        URI uri = URI.create(target);
+-        String scheme = uri.getScheme();
+-        if (!"http".equalsIgnoreCase(scheme) && !"https".equalsIgnoreCase(scheme)) {
+-            sendError(output, 415, "Only HTTP Stremio streams can be relayed in this build");
+-            return;
+-        }
++    private void proxy(String method, URI uri, Map<String, String> requestHeaders, OutputStream output) throws Exception {
++        ensureHttp(uri);
+         HttpURLConnection upstream = (HttpURLConnection) uri.toURL().openConnection();
+         upstream.setInstanceFollowRedirects(true);
+         upstream.setConnectTimeout(12_000);
+         upstream.setReadTimeout(30_000);
+-        upstream.setRequestMethod("HEAD".equals(method) ? "HEAD" : "GET");
+-        upstream.setRequestProperty("User-Agent", requestHeaders.getOrDefault("user-agent", "ScreenSpan/0.2"));
++        upstream.setRequestMethod(method);
++        upstream.setRequestProperty("User-Agent", requestHeaders.getOrDefault("user-agent", "ScreenSpan/0.3"));
++        upstream.setRequestProperty("Accept-Encoding", "identity");
+         copyHeader(requestHeaders, upstream, "range");
+         copyHeader(requestHeaders, upstream, "accept");
+-        copyHeader(requestHeaders, upstream, "accept-encoding");
+         int code = upstream.getResponseCode();
+         String contentType = upstream.getContentType();
+         boolean playlist = contentType != null && contentType.toLowerCase(Locale.ROOT).contains("mpegurl")
+                 || uri.getPath() != null && uri.getPath().toLowerCase(Locale.ROOT).contains(".m3u8");
+ 
+-        if (playlist && !"HEAD".equals(method) && code >= 200 && code < 300) {
+-            String body = readText(upstream.getInputStream());
+-            byte[] rewritten = rewritePlaylist(body, uri).getBytes(StandardCharsets.UTF_8);
+-            writeStatus(output, 200, "OK");
+-            writeHeader(output, "Content-Type", contentType == null ? "application/vnd.apple.mpegurl" : contentType);
+-            writeHeader(output, "Content-Length", String.valueOf(rewritten.length));
+-            writeHeader(output, "Cache-Control", "no-store");
++        try {
++            if (playlist && "GET".equals(method) && code >= 200 && code < 300) {
++                String body = readText(upstream.getInputStream());
++                byte[] rewritten = rewritePlaylist(body, uri).getBytes(StandardCharsets.UTF_8);
++                writeStatus(output, 200, "OK");
++                writeHeader(output, "Content-Type", contentType == null ? "application/vnd.apple.mpegurl" : contentType);
++                writeHeader(output, "Content-Length", String.valueOf(rewritten.length));
++                writeHeader(output, "Cache-Control", "no-store");
++                finishHeaders(output);
++                output.write(rewritten);
++                output.flush();
++                return;
++            }
++
++            writeStatus(output, code, upstream.getResponseMessage() == null ? "Upstream" : upstream.getResponseMessage());
++            passHeader(upstream, output, "Content-Type");
++            passHeader(upstream, output, "Content-Length");
++            passHeader(upstream, output, "Content-Range");
++            passHeader(upstream, output, "Accept-Ranges");
++            passHeader(upstream, output, "ETag");
++            passHeader(upstream, output, "Last-Modified");
++            writeHeader(output, "Connection", "close");
+             finishHeaders(output);
+-            output.write(rewritten);
++            if (!"HEAD".equals(method)) {
++                InputStream input = code >= 400 ? upstream.getErrorStream() : upstream.getInputStream();
++                if (input != null) copy(input, output);
++            }
+             output.flush();
++        } finally {
+             upstream.disconnect();
+-            return;
+         }
+-
+-        writeStatus(output, code, upstream.getResponseMessage() == null ? "Upstream" : upstream.getResponseMessage());
+-        passHeader(upstream, output, "Content-Type");
+-        passHeader(upstream, output, "Content-Length");
+-        passHeader(upstream, output, "Content-Range");
+-        passHeader(upstream, output, "Accept-Ranges");
+-        passHeader(upstream, output, "ETag");
+-        passHeader(upstream, output, "Last-Modified");
+-        writeHeader(output, "Connection", "close");
+-        finishHeaders(output);
+-        if (!"HEAD".equals(method)) {
+-            InputStream input = code >= 400 ? upstream.getErrorStream() : upstream.getInputStream();
+-            if (input != null) copy(input, output);
+-        }
+-        output.flush();
+-        upstream.disconnect();
+     }
+ 
+     private String rewritePlaylist(String body, URI base) {
+-        String relayBase = "http://" + NetworkUtils.localIpv4() + ":" + port + "/fetch?u=";
++        String ip = NetworkUtils.localIpv4();
++        if (ip == null) throw new IllegalStateException("Phone left the local network");
++        String relayBase = relayBase(ip);
+         StringBuilder result = new StringBuilder();
+         for (String line : body.split("\\r?\\n", -1)) {
+             String trimmed = line.trim();
+             if (!trimmed.isEmpty() && !trimmed.startsWith("#")) {
+                 URI resolved = base.resolve(trimmed);
+-                line = relayBase + URLEncoder.encode(resolved.toString(), StandardCharsets.UTF_8);
++                ensureHttp(resolved);
++                line = relayBase + register(resolved);
+             } else if (trimmed.startsWith("#")) {
+                 Matcher matcher = URI_ATTRIBUTE.matcher(line);
+                 StringBuffer rewritten = new StringBuffer();
+                 while (matcher.find()) {
+                     URI resolved = base.resolve(matcher.group(1));
+-                    String replacement = "URI=\"" + relayBase + URLEncoder.encode(resolved.toString(), StandardCharsets.UTF_8) + "\"";
++                    ensureHttp(resolved);
++                    String replacement = "URI=\"" + relayBase + register(resolved) + "\"";
+                     matcher.appendReplacement(rewritten, Matcher.quoteReplacement(replacement));
+                 }
+                 matcher.appendTail(rewritten);
+@@ -169,6 +192,38 @@ public final class StreamRelayServer {
+         return result.toString();
+     }
+ 
++    private String register(URI uri) {
++        byte[] bytes = new byte[18];
++        String id;
++        synchronized (allowedUrls) {
++            do {
++                random.nextBytes(bytes);
++                id = Base64.encodeToString(bytes, Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING);
++            } while (allowedUrls.containsKey(id));
++            allowedUrls.put(id, uri);
++        }
++        return id;
++    }
++
++    private URI lookup(String id) {
++        if (id == null || !id.matches("[A-Za-z0-9_-]{20,32}")) return null;
++        synchronized (allowedUrls) { return allowedUrls.get(id); }
++    }
++
++    private String relayBase(String ip) {
++        return "http://" + ip + ":" + port + "/fetch?id=";
++    }
++
++    private static void ensureHttp(URI uri) {
++        String scheme = uri.getScheme();
++        if (!"http".equalsIgnoreCase(scheme) && !"https".equalsIgnoreCase(scheme)) {
++            throw new IllegalArgumentException("Only HTTP Stremio streams can be relayed");
++        }
++        if (uri.getHost() == null || uri.getHost().isBlank()) {
++            throw new IllegalArgumentException("Stream URL has no host");
++        }
++    }
++
+     private static void copyHeader(Map<String, String> from, HttpURLConnection to, String name) {
+         String value = from.get(name);
+         if (value != null) to.setRequestProperty(name, value);
+@@ -176,7 +231,7 @@ public final class StreamRelayServer {
+ 
+     private static void passHeader(HttpURLConnection from, OutputStream to, String name) throws IOException {
+         String value = from.getHeaderField(name);
+-        if (value != null) writeHeader(to, name, value);
++        if (value != null && value.indexOf('\r') < 0 && value.indexOf('\n') < 0) writeHeader(to, name, value);
+     }
+ 
+     private static String queryValue(String target, String key) {
+@@ -184,8 +239,8 @@ public final class StreamRelayServer {
+         if (q < 0) return null;
+         for (String pair : target.substring(q + 1).split("&")) {
+             int equals = pair.indexOf('=');
+-            String k = equals < 0 ? pair : pair.substring(0, equals);
+-            if (key.equals(URLDecoder.decode(k, StandardCharsets.UTF_8))) return equals < 0 ? "" : pair.substring(equals + 1);
++            String currentKey = equals < 0 ? pair : pair.substring(0, equals);
++            if (key.equals(currentKey)) return equals < 0 ? "" : pair.substring(equals + 1);
+         }
+         return null;
+     }
+@@ -193,7 +248,7 @@ public final class StreamRelayServer {
+     private static String readText(InputStream input) throws IOException {
+         try (InputStream in = input; ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+             copy(in, out);
+-            return out.toString(StandardCharsets.UTF_8);
++            return new String(out.toByteArray(), StandardCharsets.UTF_8);
+         }
+     }
+ 
