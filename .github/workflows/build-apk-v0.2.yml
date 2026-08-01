@@ -88,7 +88,7 @@ jobs:
           set -euo pipefail
           gradle test :app:assembleRelease --stacktrace
           cp app/build/outputs/apk/release/app-release.apk "$GITHUB_WORKSPACE/ScreenSpan-v0.3.0-ci-test.apk"
-          apksigner verify --verbose --print-certs "$GITHUB_WORKSPACE/ScreenSpan-v0.3.0-ci-test.apk"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs "$GITHUB_WORKSPACE/ScreenSpan-v0.3.0-ci-test.apk"
           sha256sum "$GITHUB_WORKSPACE/ScreenSpan-v0.3.0-ci-test.apk" | tee "$GITHUB_WORKSPACE/ScreenSpan-v0.3.0-ci-test.apk.sha256"
 
       - name: Upload CI APK artifact
