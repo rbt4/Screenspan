@@ -1,0 +1,206 @@
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index f97c9b0..84dc4c1 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -20,6 +20,8 @@
+     <application
+         android:allowBackup="false"
+         android:banner="@drawable/tv_banner"
++        android:dataExtractionRules="@xml/data_extraction_rules"
++        android:fullBackupContent="false"
+         android:icon="@drawable/ic_screenspan"
+         android:label="@string/app_name"
+         android:networkSecurityConfig="@xml/network_security_config"
+diff --git a/app/src/main/java/com/rbt4/screenspan/HttpCommandClient.java b/app/src/main/java/com/rbt4/screenspan/HttpCommandClient.java
+index 80b63f7..803ff9e 100644
+--- a/app/src/main/java/com/rbt4/screenspan/HttpCommandClient.java
++++ b/app/src/main/java/com/rbt4/screenspan/HttpCommandClient.java
+@@ -1,6 +1,7 @@
+ package com.rbt4.screenspan;
+ 
+ import java.io.BufferedReader;
++import java.io.InputStream;
+ import java.io.InputStreamReader;
+ import java.io.UnsupportedEncodingException;
+ import java.net.HttpURLConnection;
+@@ -9,6 +10,8 @@ import java.nio.charset.StandardCharsets;
+ 
+ public final class HttpCommandClient {
++    private static final int MAX_RESPONSE_CHARS = 64 * 1024;
++
+     private HttpCommandClient() {}
+ 
+     public static String get(NsdLink.Endpoint endpoint, String path) throws Exception {
+@@ -18,15 +21,27 @@ public final class HttpCommandClient {
+         connection.setReadTimeout(6000);
+         connection.setUseCaches(false);
+-        int code = connection.getResponseCode();
+-        BufferedReader reader = new BufferedReader(new InputStreamReader(
+-                code >= 400 ? connection.getErrorStream() : connection.getInputStream(), StandardCharsets.UTF_8));
+-        StringBuilder body = new StringBuilder();
+-        String line;
+-        while ((line = reader.readLine()) != null) body.append(line).append('\n');
+-        if (code < 200 || code >= 300) throw new IllegalStateException("TV returned HTTP " + code + ": " + body);
+-        return body.toString().trim();
++        try {
++            int code = connection.getResponseCode();
++            InputStream response = code >= 400 ? connection.getErrorStream() : connection.getInputStream();
++            StringBuilder body = new StringBuilder();
++            if (response != null) {
++                try (BufferedReader reader = new BufferedReader(new InputStreamReader(response, StandardCharsets.UTF_8))) {
++                    char[] buffer = new char[2048];
++                    int read;
++                    while ((read = reader.read(buffer)) >= 0) {
++                        if (body.length() + read > MAX_RESPONSE_CHARS) {
++                            throw new IllegalStateException("TV response was unexpectedly large");
++                        }
++                        body.append(buffer, 0, read);
++                    }
++                }
++            }
++            if (code < 200 || code >= 300) {
++                throw new IllegalStateException("TV returned HTTP " + code + ": " + body);
++            }
++            return body.toString().trim();
++        } finally {
++            connection.disconnect();
++        }
+     }
+ 
+     public static String encode(String value) {
+diff --git a/app/src/main/java/com/rbt4/screenspan/NsdLink.java b/app/src/main/java/com/rbt4/screenspan/NsdLink.java
+index 9bb4f97..6384a4e 100644
+--- a/app/src/main/java/com/rbt4/screenspan/NsdLink.java
++++ b/app/src/main/java/com/rbt4/screenspan/NsdLink.java
+@@ -83,7 +83,7 @@ public final class NsdLink {
+                         Map<String, byte[]> attributes = info.getAttributes();
+                         byte[] tokenBytes = attributes == null ? null : attributes.get(TOKEN_ATTRIBUTE);
+                         if (tokenBytes == null || tokenBytes.length < 16) {
+-                            listener.onStatus("TV was found but its secure pairing token was missing");
++                            listener.onStatus("TV was found but its automatic pairing token was missing");
+                             return;
+                         }
+                         String token = new String(tokenBytes, StandardCharsets.UTF_8);
+diff --git a/app/src/main/java/com/rbt4/screenspan/PhoneActivity.java b/app/src/main/java/com/rbt4/screenspan/PhoneActivity.java
+index ae77331..fbbcb86 100644
+--- a/app/src/main/java/com/rbt4/screenspan/PhoneActivity.java
++++ b/app/src/main/java/com/rbt4/screenspan/PhoneActivity.java
+@@ -317,7 +317,7 @@ public final class PhoneActivity extends Activity implements NsdLink.Listener {
+         runOnUiThread(() -> {
+             tvEndpoint = endpoint;
+             scanButton.setEnabled(true);
+-            setStatus("Connected securely to ScreenSpan TV");
++            setStatus("Connected to ScreenSpan TV");
+             sendPendingWhenReady();
+         });
+     }
+diff --git a/app/src/main/java/com/rbt4/screenspan/ScreenSpanHttpServer.java b/app/src/main/java/com/rbt4/screenspan/ScreenSpanHttpServer.java
+index a063531..c205f67 100644
+--- a/app/src/main/java/com/rbt4/screenspan/ScreenSpanHttpServer.java
++++ b/app/src/main/java/com/rbt4/screenspan/ScreenSpanHttpServer.java
+@@ -7,6 +7,7 @@ import java.io.InputStreamReader;
+ import java.io.OutputStream;
+ import java.io.UnsupportedEncodingException;
++import java.net.InetSocketAddress;
+ import java.net.ServerSocket;
+ import java.net.Socket;
+ import java.net.URLDecoder;
+@@ -30,7 +31,7 @@ public final class ScreenSpanHttpServer {
+ 
+     private final Controller controller;
+     private final String token;
+-    private final ExecutorService clients = Executors.newCachedThreadPool();
++    private final ExecutorService clients = Executors.newFixedThreadPool(4);
+     private volatile boolean running;
+     private ServerSocket serverSocket;
+     private Thread acceptThread;
+@@ -44,7 +45,10 @@ public final class ScreenSpanHttpServer {
+ 
+     public void start() throws IOException {
+         if (running) return;
+-        serverSocket = new ServerSocket(port);
++        serverSocket = new ServerSocket();
++        serverSocket.setReuseAddress(true);
++        serverSocket.bind(new InetSocketAddress(port), 8);
+         running = true;
+         acceptThread = new Thread(() -> {
+             while (running) {
+@@ -73,16 +77,29 @@ public final class ScreenSpanHttpServer {
+         try (socket;
+              BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
+              OutputStream output = socket.getOutputStream()) {
++            socket.setSoTimeout(10_000);
+             String request = reader.readLine();
+             if (request == null || request.trim().isEmpty()) return;
++            if (request.length() > 8192) {
++                respond(output, 414, "text/plain", "Request target too long");
++                return;
++            }
+             String[] parts = request.split(" ");
+             if (parts.length < 2 || !"GET".equals(parts[0])) {
+                 respond(output, 405, "text/plain", "Method not allowed");
+                 return;
+             }
+             String target = parts[1];
+             Map<String, String> headers = new HashMap<>();
++            int headerBytes = 0;
++            int headerCount = 0;
+             while (true) {
+                 String header = reader.readLine();
+                 if (header == null || header.isEmpty()) break;
++                headerBytes += header.length();
++                headerCount++;
++                if (header.length() > 8192 || headerBytes > 32 * 1024 || headerCount > 64) {
++                    respond(output, 431, "text/plain", "Request headers too large");
++                    return;
++                }
+                 int colon = header.indexOf(':');
+                 if (colon > 0) headers.put(header.substring(0, colon).trim().toLowerCase(Locale.US),
+                         header.substring(colon + 1).trim());
+@@ -130,7 +147,13 @@ public final class ScreenSpanHttpServer {
+             } else if ("/play".equals(path)) {
+                 String raw = parameters.get("uri");
+                 if (raw == null || raw.trim().isEmpty()) throw new IllegalArgumentException("missing uri");
+-                controller.play(Uri.parse(raw));
++                Uri media = Uri.parse(raw);
++                String scheme = media.getScheme();
++                if (!("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme))) {
++                    respond(output, 415, "application/json", "{\"error\":\"unsupported media URL\"}");
++                    return;
++                }
++                controller.play(media);
+                 respond(output, 200, "application/json", "{\"ok\":true}");
+             } else if ("/update".equals(path)) {
+                 controller.startUpdate();
+@@ -149,9 +172,13 @@ public final class ScreenSpanHttpServer {
+             case 200 -> "OK";
+             case 403 -> "Forbidden";
+             case 405 -> "Method Not Allowed";
++            case 414 -> "URI Too Long";
++            case 415 -> "Unsupported Media Type";
++            case 431 -> "Request Header Fields Too Large";
+             default -> "Not Found";
+         };
+         String headers = "HTTP/1.1 " + code + " " + status + "\r\n" +
+-                "Content-Type: " + type + "\r\n" +
++                "Content-Type: " + type + "; charset=utf-8\r\n" +
+                 "Content-Length: " + bytes.length + "\r\n" +
+                 "Cache-Control: no-store\r\n" +
+                 "Connection: close\r\n\r\n";
+diff --git a/app/src/main/res/xml/data_extraction_rules.xml b/app/src/main/res/xml/data_extraction_rules.xml
+new file mode 100644
+index 0000000..1d58a2e
+--- /dev/null
++++ b/app/src/main/res/xml/data_extraction_rules.xml
+@@ -0,0 +1,12 @@
++<?xml version="1.0" encoding="utf-8"?>
++<data-extraction-rules>
++    <cloud-backup>
++        <exclude domain="root" path="." />
++        <exclude domain="device_root" path="." />
++    </cloud-backup>
++    <device-transfer>
++        <exclude domain="root" path="." />
++        <exclude domain="device_root" path="." />
++    </device-transfer>
++</data-extraction-rules>
