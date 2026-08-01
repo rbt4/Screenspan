@@ -1,0 +1,11 @@
+--- a/app/src/main/java/com/rbt4/screenspan/NsdLink.java
++++ b/app/src/main/java/com/rbt4/screenspan/NsdLink.java
+@@ -46,7 +46,7 @@
+         info.setServiceName(SERVICE_NAME);
+         info.setServiceType(SERVICE_TYPE);
+         info.setPort(port);
+-        info.setAttribute(TOKEN_ATTRIBUTE, token.getBytes(StandardCharsets.UTF_8));
++        info.setAttribute(TOKEN_ATTRIBUTE, token);
+         registrationListener = new NsdManager.RegistrationListener() {
+             @Override public void onServiceRegistered(NsdServiceInfo serviceInfo) {
+                 listener.onStatus("TV visible to phone as " + serviceInfo.getServiceName());
