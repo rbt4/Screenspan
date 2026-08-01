@@ -1,5 +1,4 @@
 diff --git a/app/src/main/java/com/rbt4/screenspan/CalibrationState.java b/app/src/main/java/com/rbt4/screenspan/CalibrationState.java
-index 0000000..1111111 100644
 --- a/app/src/main/java/com/rbt4/screenspan/CalibrationState.java
 +++ b/app/src/main/java/com/rbt4/screenspan/CalibrationState.java
 @@ -104,13 +104,17 @@ public final class CalibrationState {
