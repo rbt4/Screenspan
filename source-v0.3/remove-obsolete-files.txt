@@ -1,0 +1,4 @@
+app/src/main/assets/calibrate.html
+app/src/main/java/com/rbt4/screenspan/CalibrationHttpServer.java
+app/src/main/java/com/rbt4/screenspan/CalibrationState.java.orig
+app/src/main/java/com/rbt4/screenspan/MainActivity.java
