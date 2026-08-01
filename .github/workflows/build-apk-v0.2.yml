@@ -43,7 +43,7 @@ jobs:
           mkdir -p /tmp/screenspan-v0.2
           unzip -q /tmp/ScreenSpan-source-v0.1.0.zip -d /tmp/screenspan-v0.2
 
-          cat source-v0.2/ScreenSpan-v0.2-overlay.tar.gz.b64.part-* \
+          cat source-v0.2/fixed/chunk-*.b64 \
             | tr -d '\r\n' \
             | base64 --decode > /tmp/ScreenSpan-v0.2-overlay.tar.gz
           echo 'c79ca9dcd81cfecdce89adb87ce0ead0bf04a4cb164f08c6fd1bd5e983a2ac37  /tmp/ScreenSpan-v0.2-overlay.tar.gz' | sha256sum --check
