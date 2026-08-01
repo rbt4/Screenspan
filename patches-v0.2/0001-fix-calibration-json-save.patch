@@ -1,0 +1,31 @@
+diff --git a/app/src/main/java/com/rbt4/screenspan/CalibrationState.java b/app/src/main/java/com/rbt4/screenspan/CalibrationState.java
+index 0000000..1111111 100644
+--- a/app/src/main/java/com/rbt4/screenspan/CalibrationState.java
++++ b/app/src/main/java/com/rbt4/screenspan/CalibrationState.java
+@@ -104,13 +104,17 @@ public final class CalibrationState {
+     }
+ 
+     private void save() {
+-        JSONArray array = new JSONArray();
+-        for (float v : quad) array.put((double) v);
+-        preferences.edit()
+-                .putString(KEY_QUAD, array.toString())
+-                .putBoolean(KEY_CALIBRATED, calibrated)
+-                .putInt(KEY_MODE, effectMode)
+-                .putFloat(KEY_BRIGHTNESS, brightness)
+-                .apply();
++        try {
++            JSONArray array = new JSONArray();
++            for (float v : quad) array.put((double) v);
++            preferences.edit()
++                    .putString(KEY_QUAD, array.toString())
++                    .putBoolean(KEY_CALIBRATED, calibrated)
++                    .putInt(KEY_MODE, effectMode)
++                    .putFloat(KEY_BRIGHTNESS, brightness)
++                    .apply();
++        } catch (JSONException impossible) {
++            // JSONArray only rejects non-finite numbers; calibrated coordinates are finite.
++        }
+     }
+ 
+     private static float[] parseQuad(String encoded) {
