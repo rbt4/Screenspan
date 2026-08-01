@@ -10,6 +10,7 @@ on:
       - 'source-v0.2/**'
       - 'source-v0.3/**'
       - 'patches-v0.2/**'
+      - 'patches-v0.3/**'
       - '.github/workflows/build-apk-v0.2.yml'
   pull_request:
     branches:
@@ -18,6 +19,7 @@ on:
       - 'source-v0.2/**'
       - 'source-v0.3/**'
       - 'patches-v0.2/**'
+      - 'patches-v0.3/**'
       - '.github/workflows/build-apk-v0.2.yml'
 
 permissions:
@@ -53,6 +55,11 @@ jobs:
           cat source-v0.3/chunk-*.b64 | tr -d '\r\n' | base64 --decode > /tmp/ScreenSpan-v0.3-overlay.tar.gz
           echo '2b2ccd9e878ad9606c6e711dc3cd7b7e3add48f85a3a2a3fc8bb717146ab763e  /tmp/ScreenSpan-v0.3-overlay.tar.gz' | sha256sum --check
           tar -xzf /tmp/ScreenSpan-v0.3-overlay.tar.gz -C /tmp/screenspan-v0.3/screenspan
+
+          for patch_file in "$GITHUB_WORKSPACE"/patches-v0.3/*.patch; do
+            [ -e "$patch_file" ] || continue
+            patch -d /tmp/screenspan-v0.3/screenspan -p1 --forward < "$patch_file"
+          done
 
       - name: Set up Java 17
         uses: actions/setup-java@v4
