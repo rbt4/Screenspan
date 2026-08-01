@@ -110,7 +110,7 @@ jobs:
           "$AAPT" dump permissions "$APK" | tee "$GITHUB_WORKSPACE/apk-permissions.txt"
           grep -F 'android.permission.REQUEST_INSTALL_PACKAGES' "$GITHUB_WORKSPACE/apk-permissions.txt"
           "$APKSIGNER" verify --verbose --print-certs "$APK" | tee "$GITHUB_WORKSPACE/apk-signature.txt"
-          grep -Fi 'bc8cdea641992d72cfd0ed27d4a05b83130c6751b740a6347c58f57e5203287b' "$GITHUB_WORKSPACE/apk-signature.txt"
+          grep -Fi '5e2f4d616b1cf959de1fd5b14c44fb136fd1787758b4a5a77be4d1ace3d5a022' "$GITHUB_WORKSPACE/apk-signature.txt"
           sha256sum "$APK" > "$SHA_FILE"
           sha256sum --check "$SHA_FILE"
 
