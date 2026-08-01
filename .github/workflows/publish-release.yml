@@ -105,12 +105,13 @@ jobs:
           AAPT="$ANDROID_HOME/build-tools/36.0.0/aapt"
           APKSIGNER="$ANDROID_HOME/build-tools/36.0.0/apksigner"
           "$AAPT" dump badging "$APK" | tee "$GITHUB_WORKSPACE/apk-badging.txt"
-          grep -F "package: name='com.rbt4.screenspan' versionName='${VERSION}'" "$GITHUB_WORKSPACE/apk-badging.txt"
+          grep -F "package: name='com.rbt4.screenspan'" "$GITHUB_WORKSPACE/apk-badging.txt"
+          grep -F "versionName='${VERSION}'" "$GITHUB_WORKSPACE/apk-badging.txt"
           "$AAPT" dump permissions "$APK" | tee "$GITHUB_WORKSPACE/apk-permissions.txt"
           grep -F 'android.permission.REQUEST_INSTALL_PACKAGES' "$GITHUB_WORKSPACE/apk-permissions.txt"
           "$APKSIGNER" verify --verbose --print-certs "$APK" | tee "$GITHUB_WORKSPACE/apk-signature.txt"
           grep -Fi 'bc8cdea641992d72cfd0ed27d4a05b83130c6751b740a6347c58f57e5203287b' "$GITHUB_WORKSPACE/apk-signature.txt"
-          sha256sum "$(basename "$APK")" > "$SHA_FILE"
+          sha256sum "$APK" > "$SHA_FILE"
           sha256sum --check "$SHA_FILE"
 
       - name: Publish exact update assets
