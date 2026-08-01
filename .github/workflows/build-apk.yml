@@ -1,0 +1,73 @@
+name: Build ScreenSpan APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - 'agent/**'
+    paths:
+      - 'source/**'
+      - '.github/workflows/build-apk.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Reconstruct source archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat source/ScreenSpan-source-v0.1.0.zip.b64.part-* \
+            | tr -d '\r\n' \
+            | base64 --decode > /tmp/ScreenSpan-source-v0.1.0.zip
+          echo 'f7a928bc66e1482367fbcb8fa160ae711f08a83b1a8530d8c5ee7669c5501c85  /tmp/ScreenSpan-source-v0.1.0.zip' | sha256sum --check
+          mkdir -p /tmp/screenspan-source
+          unzip -q /tmp/ScreenSpan-source-v0.1.0.zip -d /tmp/screenspan-source
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android platform
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager 'platform-tools' 'platforms;android-36' 'build-tools;36.0.0'
+
+      - name: Set up Gradle 9.5
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.5.0'
+
+      - name: Test and build signed release APK
+        working-directory: /tmp/screenspan-source/screenspan
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle test :app:assembleRelease --stacktrace
+          cp app/build/outputs/apk/release/app-release.apk "$GITHUB_WORKSPACE/ScreenSpan-v0.1.0-test.apk"
+          sha256sum "$GITHUB_WORKSPACE/ScreenSpan-v0.1.0-test.apk" | tee "$GITHUB_WORKSPACE/ScreenSpan-v0.1.0-test.apk.sha256"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ScreenSpan-v0.1.0-test
+          path: |
+            ScreenSpan-v0.1.0-test.apk
+            ScreenSpan-v0.1.0-test.apk.sha256
+          if-no-files-found: error
+          retention-days: 30
