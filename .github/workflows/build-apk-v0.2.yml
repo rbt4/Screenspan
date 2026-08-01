@@ -1,0 +1,97 @@
+name: Build ScreenSpan 0.2 APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - 'agent/**'
+    paths:
+      - 'source-v0.2/**'
+      - 'patches-v0.2/**'
+      - '.github/workflows/build-apk-v0.2.yml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'source-v0.2/**'
+      - 'patches-v0.2/**'
+      - '.github/workflows/build-apk-v0.2.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Reconstruct ScreenSpan 0.2 source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat source/ScreenSpan-source-v0.1.0.zip.b64.part-* \
+            | tr -d '\r\n' \
+            | base64 --decode > /tmp/ScreenSpan-source-v0.1.0.zip
+          echo 'f7a928bc66e1482367fbcb8fa160ae711f08a83b1a8530d8c5ee7669c5501c85  /tmp/ScreenSpan-source-v0.1.0.zip' | sha256sum --check
+
+          mkdir -p /tmp/screenspan-v0.2
+          unzip -q /tmp/ScreenSpan-source-v0.1.0.zip -d /tmp/screenspan-v0.2
+
+          cat source-v0.2/fixed/chunk-*.b64 \
+            | tr -d '\r\n' \
+            | base64 --decode > /tmp/ScreenSpan-v0.2-overlay.tar.gz
+          echo 'c79ca9dcd81cfecdce89adb87ce0ead0bf04a4cb164f08c6fd1bd5e983a2ac37  /tmp/ScreenSpan-v0.2-overlay.tar.gz' | sha256sum --check
+
+          tar -xzf /tmp/ScreenSpan-v0.2-overlay.tar.gz \
+            -C /tmp/screenspan-v0.2/screenspan
+
+          for patch_file in "$GITHUB_WORKSPACE"/patches-v0.2/*.patch; do
+            [ -e "$patch_file" ] || continue
+            patch -d /tmp/screenspan-v0.2/screenspan -p1 --forward < "$patch_file"
+          done
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android platform
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager 'platform-tools' 'platforms;android-36' 'build-tools;36.0.0'
+
+      - name: Set up Gradle 9.5
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.5.0'
+
+      - name: Test and build signed APK
+        working-directory: /tmp/screenspan-v0.2/screenspan
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle test :app:assembleRelease --stacktrace
+          cp app/build/outputs/apk/release/app-release.apk "$GITHUB_WORKSPACE/ScreenSpan-v0.2.0-smart-test.apk"
+          sha256sum "$GITHUB_WORKSPACE/ScreenSpan-v0.2.0-smart-test.apk" \
+            | tee "$GITHUB_WORKSPACE/ScreenSpan-v0.2.0-smart-test.apk.sha256"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ScreenSpan-v0.2.0-smart-test
+          path: |
+            ScreenSpan-v0.2.0-smart-test.apk
+            ScreenSpan-v0.2.0-smart-test.apk.sha256
+          if-no-files-found: error
+          retention-days: 30
