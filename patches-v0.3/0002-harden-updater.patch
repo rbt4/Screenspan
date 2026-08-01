@@ -1,0 +1,258 @@
+--- a/app/src/main/java/com/rbt4/screenspan/ScreenSpanUpdater.java
++++ b/app/src/main/java/com/rbt4/screenspan/ScreenSpanUpdater.java
+@@ -2,6 +2,7 @@
+ 
+ import android.app.Activity;
+ import android.app.PendingIntent;
++import android.content.ActivityNotFoundException;
+ import android.content.Intent;
+ import android.content.pm.PackageInfo;
+ import android.content.pm.PackageInstaller;
+@@ -34,6 +35,8 @@
+ public final class ScreenSpanUpdater {
+     private static final String RELEASE_API = "https://api.github.com/repos/rbt4/Screenspan/releases/latest";
+     private static final int REQUEST_UNKNOWN_SOURCES = 7103;
++    private static final long MAX_APK_BYTES = 512L * 1024L * 1024L;
++    private static final int MAX_METADATA_BYTES = 1024 * 1024;
+ 
+     public interface Listener {
+         void onUpdateState(boolean available, String message);
+@@ -88,7 +91,11 @@
+             post(true, "Allow ScreenSpan to install updates once, then return here.");
+             Intent settings = new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                     Uri.parse("package:" + activity.getPackageName()));
+-            activity.startActivityForResult(settings, REQUEST_UNKNOWN_SOURCES);
++            try {
++                activity.startActivityForResult(settings, REQUEST_UNKNOWN_SOURCES);
++            } catch (ActivityNotFoundException unavailable) {
++                activity.startActivityForResult(new Intent(Settings.ACTION_SECURITY_SETTINGS), REQUEST_UNKNOWN_SOURCES);
++            }
+             return;
+         }
+         pendingInstall = false;
+@@ -103,8 +110,9 @@
+                 }
+                 File updateDir = new File(activity.getFilesDir(), "updates");
+                 if (!updateDir.exists() && !updateDir.mkdirs()) throw new IllegalStateException("Could not create update storage");
+-                File apk = new File(updateDir, "ScreenSpan-" + release.versionName + ".apk");
+-                String expected = firstToken(readText(release.shaUrl));
++                String apkName = "ScreenSpan-v" + release.versionName + ".apk";
++                File apk = new File(updateDir, apkName);
++                String expected = checksumFor(readText(release.shaUrl), apkName);
+                 download(release.apkUrl, apk);
+                 String actual = sha256(apk);
+                 if (!actual.equalsIgnoreCase(expected)) {
+@@ -138,6 +146,8 @@
+         String tag = release.optString("tag_name", "").trim();
+         String version = tag.startsWith("v") ? tag.substring(1) : tag;
+         if (version.isEmpty()) throw new IllegalStateException("release version was missing");
++        String apkName = "ScreenSpan-v" + version + ".apk";
++        String shaName = apkName + ".sha256";
+         String apkUrl = null;
+         String shaUrl = null;
+         JSONArray assets = release.optJSONArray("assets");
+@@ -146,8 +156,8 @@
+                 JSONObject asset = assets.getJSONObject(i);
+                 String name = asset.optString("name", "");
+                 String url = asset.optString("browser_download_url", "");
+-                if (name.endsWith(".apk")) apkUrl = url;
+-                if (name.endsWith(".apk.sha256") || name.endsWith(".sha256")) shaUrl = url;
++                if (apkName.equals(name)) apkUrl = url;
++                if (shaName.equals(name)) shaUrl = url;
+             }
+         }
+         if (apkUrl == null || shaUrl == null) throw new IllegalStateException("release files were incomplete");
+@@ -161,16 +171,17 @@
+ 
+     private void verifyPackage(File apk) throws Exception {
+         PackageManager manager = activity.getPackageManager();
+-        PackageInfo archive = manager.getPackageArchiveInfo(apk.getAbsolutePath(), PackageManager.GET_SIGNING_CERTIFICATES);
+-        PackageInfo installed = manager.getPackageInfo(activity.getPackageName(), PackageManager.GET_SIGNING_CERTIFICATES);
++        int signatureFlags = Build.VERSION.SDK_INT >= 28
++                ? PackageManager.GET_SIGNING_CERTIFICATES
++                : PackageManager.GET_SIGNATURES;
++        PackageInfo archive = manager.getPackageArchiveInfo(apk.getAbsolutePath(), signatureFlags);
++        PackageInfo installed = manager.getPackageInfo(activity.getPackageName(), signatureFlags);
+         if (archive == null || !activity.getPackageName().equals(archive.packageName)) {
+             throw new SecurityException("update belongs to a different app");
+         }
+-        if (Build.VERSION.SDK_INT >= 28) {
+-            long incoming = archive.getLongVersionCode();
+-            long current = installed.getLongVersionCode();
+-            if (incoming <= current) throw new SecurityException("update version is not newer");
+-        }
++        long incoming = Build.VERSION.SDK_INT >= 28 ? archive.getLongVersionCode() : archive.versionCode;
++        long current = Build.VERSION.SDK_INT >= 28 ? installed.getLongVersionCode() : installed.versionCode;
++        if (incoming <= current) throw new SecurityException("update version is not newer");
+         byte[][] installedCerts = certificateDigests(installed);
+         byte[][] archiveCerts = certificateDigests(archive);
+         if (!sameCertificates(installedCerts, archiveCerts)) {
+@@ -190,10 +201,19 @@
+         for (int i = 0; i < signatures.length; i++) {
+             results[i] = MessageDigest.getInstance("SHA-256").digest(signatures[i].toByteArray());
+         }
+-        Arrays.sort(results, Arrays::compare);
++        Arrays.sort(results, ScreenSpanUpdater::compareBytes);
+         return results;
+     }
+ 
++    private static int compareBytes(byte[] first, byte[] second) {
++        int length = Math.min(first.length, second.length);
++        for (int i = 0; i < length; i++) {
++            int comparison = Integer.compare(first[i] & 0xff, second[i] & 0xff);
++            if (comparison != 0) return comparison;
++        }
++        return Integer.compare(first.length, second.length);
++    }
++
+     private static boolean sameCertificates(byte[][] first, byte[][] second) {
+         if (first.length != second.length) return false;
+         int diff = 0;
+@@ -210,35 +230,48 @@
+         params.setAppPackageName(activity.getPackageName());
+         if (Build.VERSION.SDK_INT >= 31) params.setRequireUserAction(PackageInstaller.SessionParams.USER_ACTION_REQUIRED);
+         int sessionId = installer.createSession(params);
+-        try (PackageInstaller.Session session = installer.openSession(sessionId);
+-             InputStream input = new BufferedInputStream(new FileInputStream(apk));
+-             OutputStream output = session.openWrite("ScreenSpan.apk", 0, apk.length())) {
+-            byte[] buffer = new byte[128 * 1024];
+-            int read;
+-            while ((read = input.read(buffer)) >= 0) output.write(buffer, 0, read);
+-            session.fsync(output);
+-            Intent result = new Intent(activity, UpdateResultReceiver.class)
+-                    .setAction(UpdateResultReceiver.ACTION_INSTALL_RESULT);
+-            PendingIntent pending = PendingIntent.getBroadcast(activity, sessionId, result,
+-                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_MUTABLE);
+-            session.commit(pending.getIntentSender());
++        try {
++            try (PackageInstaller.Session session = installer.openSession(sessionId);
++                 InputStream input = new BufferedInputStream(new FileInputStream(apk));
++                 OutputStream output = session.openWrite("ScreenSpan.apk", 0, apk.length())) {
++                byte[] buffer = new byte[128 * 1024];
++                int read;
++                while ((read = input.read(buffer)) >= 0) output.write(buffer, 0, read);
++                session.fsync(output);
++                Intent result = new Intent(activity, UpdateResultReceiver.class)
++                        .setAction(UpdateResultReceiver.ACTION_INSTALL_RESULT);
++                PendingIntent pending = PendingIntent.getBroadcast(activity, sessionId, result,
++                        PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_MUTABLE);
++                session.commit(pending.getIntentSender());
++            }
++        } catch (Exception failure) {
++            try { installer.abandonSession(sessionId); } catch (Exception ignored) {}
++            throw failure;
+         }
+     }
+ 
+     private static void download(String url, File destination) throws Exception {
+         HttpURLConnection connection = open(url);
+         long expectedLength = connection.getContentLengthLong();
++        if (expectedLength > MAX_APK_BYTES) throw new SecurityException("update file was unexpectedly large");
+         File partial = new File(destination.getParentFile(), destination.getName() + ".part");
++        if (partial.exists()) partial.delete();
++        boolean complete = false;
+         try (InputStream input = new BufferedInputStream(connection.getInputStream());
+              OutputStream output = new FileOutputStream(partial)) {
+             byte[] buffer = new byte[128 * 1024];
+             long total = 0;
+             int read;
+             while ((read = input.read(buffer)) >= 0) {
+-                output.write(buffer, 0, read);
+                 total += read;
++                if (total > MAX_APK_BYTES) throw new SecurityException("update file was unexpectedly large");
++                output.write(buffer, 0, read);
+             }
+             if (expectedLength > 0 && total != expectedLength) throw new IllegalStateException("download was incomplete");
++            complete = true;
++        } finally {
++            connection.disconnect();
++            if (!complete) partial.delete();
+         }
+         if (destination.exists() && !destination.delete()) throw new IllegalStateException("old update file could not be removed");
+         if (!partial.renameTo(destination)) throw new IllegalStateException("update file could not be finalized");
+@@ -248,14 +281,22 @@
+         HttpURLConnection connection = open(url);
+         try (BufferedReader reader = new BufferedReader(new InputStreamReader(connection.getInputStream(), StandardCharsets.UTF_8))) {
+             StringBuilder result = new StringBuilder();
+-            String line;
+-            while ((line = reader.readLine()) != null) result.append(line).append('\n');
++            char[] buffer = new char[8192];
++            int read;
++            while ((read = reader.read(buffer)) >= 0) {
++                if (result.length() + read > MAX_METADATA_BYTES) throw new SecurityException("update metadata was unexpectedly large");
++                result.append(buffer, 0, read);
++            }
+             return result.toString();
++        } finally {
++            connection.disconnect();
+         }
+     }
+ 
+     private static HttpURLConnection open(String url) throws Exception {
+-        HttpURLConnection connection = (HttpURLConnection) URI.create(url).toURL().openConnection();
++        URI uri = URI.create(url);
++        if (!"https".equalsIgnoreCase(uri.getScheme())) throw new SecurityException("update URL was not HTTPS");
++        HttpURLConnection connection = (HttpURLConnection) uri.toURL().openConnection();
+         connection.setConnectTimeout(10_000);
+         connection.setReadTimeout(45_000);
+         connection.setInstanceFollowRedirects(true);
+@@ -278,11 +319,22 @@
+         return result.toString();
+     }
+ 
+-    private static String firstToken(String text) {
++    static String checksumFor(String text, String expectedFileName) {
+         String trimmed = text == null ? "" : text.trim();
+-        int space = trimmed.indexOf(' ');
+-        String token = space < 0 ? trimmed : trimmed.substring(0, space);
++        String[] fields = trimmed.split("\\s+", 2);
++        String token = fields.length == 0 ? "" : fields[0];
+         if (!token.matches("[0-9a-fA-F]{64}")) throw new SecurityException("release checksum was invalid");
++        if (fields.length > 1) {
++            String listed = fields[1].trim();
++            while (listed.startsWith("*") || listed.startsWith("./")) {
++                listed = listed.startsWith("*") ? listed.substring(1) : listed.substring(2);
++            }
++            int slash = Math.max(listed.lastIndexOf('/'), listed.lastIndexOf('\\'));
++            String baseName = slash >= 0 ? listed.substring(slash + 1) : listed;
++            if (!baseName.isEmpty() && !expectedFileName.equals(baseName)) {
++                throw new SecurityException("release checksum named a different file");
++            }
++        }
+         return token;
+     }
+ 
+--- a/app/src/test/java/com/rbt4/screenspan/ScreenSpanUpdaterTest.java
++++ b/app/src/test/java/com/rbt4/screenspan/ScreenSpanUpdaterTest.java
+@@ -3,11 +3,31 @@
+ import org.junit.Test;
+ 
+ import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertThrows;
+ 
+ public final class ScreenSpanUpdaterTest {
++    private static final String HASH = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
++
+     @Test public void comparesSemanticVersions() {
+         assertEquals(1, ScreenSpanUpdater.compareVersions("0.3.1", "0.3.0"));
+         assertEquals(0, ScreenSpanUpdater.compareVersions("v1.2.0", "1.2"));
+         assertEquals(-1, ScreenSpanUpdater.compareVersions("1.9.9", "2.0.0"));
+     }
++
++    @Test public void acceptsMatchingChecksumFileName() {
++        assertEquals(HASH, ScreenSpanUpdater.checksumFor(
++                HASH + "  ScreenSpan-v0.3.0.apk\n", "ScreenSpan-v0.3.0.apk"));
++        assertEquals(HASH, ScreenSpanUpdater.checksumFor(
++                HASH + " */tmp/ScreenSpan-v0.3.0.apk\n", "ScreenSpan-v0.3.0.apk"));
++    }
++
++    @Test public void rejectsChecksumForDifferentFile() {
++        assertThrows(SecurityException.class, () -> ScreenSpanUpdater.checksumFor(
++                HASH + "  Other.apk\n", "ScreenSpan-v0.3.0.apk"));
++    }
++
++    @Test public void rejectsMalformedChecksum() {
++        assertThrows(SecurityException.class, () -> ScreenSpanUpdater.checksumFor(
++                "not-a-checksum", "ScreenSpan-v0.3.0.apk"));
++    }
+ }
