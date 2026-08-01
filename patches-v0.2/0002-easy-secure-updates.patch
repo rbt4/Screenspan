@@ -1,0 +1,60 @@
+diff --git a/app/build.gradle b/app/build.gradle
+index 84d7098..85b02a2 100644
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -1,13 +1,18 @@
+ plugins {
+     id 'com.android.application'
+ }
+ 
+-def generatedKeystore = file("${buildDir}/generated/screenspan-test.keystore")
++def securePassword = System.getenv('SCREENSPAN_KEYSTORE_PASSWORD')
++def secureSigning = securePassword != null && !securePassword.trim().isEmpty()
++def generatedKeystore = file("${buildDir}/generated/screenspan-signing.p12")
+ generatedKeystore.parentFile.mkdirs()
+-generatedKeystore.bytes = java.util.Base64.decoder.decode(file('screenspan-test.keystore.b64').text.trim())
++if (secureSigning) {
++    generatedKeystore.bytes = java.util.Base64.decoder.decode(file('screenspan-release.p12.b64').text.trim())
++} else {
++    generatedKeystore.bytes = java.util.Base64.decoder.decode(file('screenspan-test.keystore.b64').text.trim())
++}
+ 
+ android {
+     namespace 'com.rbt4.screenspan'
+@@ -15,23 +20,24 @@ android {
+ 
+     defaultConfig {
+-        applicationId 'com.rbt4.screenspan.prototype'
++        applicationId 'com.rbt4.screenspan'
+         minSdk 26
+         targetSdk 36
+-        versionCode 2
+-        versionName '0.2.0'
++        versionCode 3
++        versionName '0.3.0'
+     }
+ 
+     signingConfigs {
+-        prototype {
++        screenspan {
+             storeFile generatedKeystore
+-            storePassword 'screenspan-test-only'
++            storeType secureSigning ? 'PKCS12' : 'JKS'
++            storePassword secureSigning ? securePassword : 'screenspan-test-only'
+             keyAlias 'screenspan'
+-            keyPassword 'screenspan-test-only'
++            keyPassword secureSigning ? securePassword : 'screenspan-test-only'
+         }
+     }
+ 
+     buildTypes {
+         debug {
+-            signingConfig signingConfigs.prototype
++            signingConfig signingConfigs.screenspan
+         }
+         release {
+-            signingConfig signingConfigs.prototype
++            signingConfig signingConfigs.screenspan
+             minifyEnabled false
+             shrinkResources false
+             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
