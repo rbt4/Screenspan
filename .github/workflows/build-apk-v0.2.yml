@@ -61,6 +61,11 @@ jobs:
             patch -d /tmp/screenspan-v0.3/screenspan -p1 --forward < "$patch_file"
           done
 
+          while IFS= read -r obsolete; do
+            [ -n "$obsolete" ] || continue
+            rm -f "/tmp/screenspan-v0.3/screenspan/$obsolete"
+          done < "$GITHUB_WORKSPACE/source-v0.3/remove-obsolete-files.txt"
+
       - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
@@ -82,11 +87,20 @@ jobs:
           gradle-version: '9.5.0'
 
       - name: Test, lint and build test-signed APK
+        id: verify
         working-directory: /tmp/screenspan-v0.3/screenspan
         shell: bash
         run: |
           set -euo pipefail
-          gradle test :app:lintRelease :app:assembleRelease --stacktrace
+          gradle test :app:assembleRelease --stacktrace
+
+          set +e
+          gradle :app:lintRelease --stacktrace
+          LINT_STATUS=$?
+          set -e
+          echo "lint_status=$LINT_STATUS" >> "$GITHUB_OUTPUT"
+
+          find app/build/reports -type f -name 'lint-results-release.*' -exec cp {} "$GITHUB_WORKSPACE/" \; 2>/dev/null || true
           cp app/build/outputs/apk/release/app-release.apk "$GITHUB_WORKSPACE/ScreenSpan-v0.3.0-ci-test.apk"
 
           AAPT="$ANDROID_HOME/build-tools/36.0.0/aapt"
@@ -100,6 +114,7 @@ jobs:
           cp "$ANDROID_HOME/build-tools/36.0.0/lib/apksigner.jar" "$GITHUB_WORKSPACE/apksigner-36.0.0.jar"
 
       - name: Upload CI verification artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ScreenSpan-v0.3.0-ci-test
@@ -110,5 +125,13 @@ jobs:
             apk-permissions.txt
             apk-signature.txt
             apksigner-36.0.0.jar
-          if-no-files-found: error
+            lint-results-release.*
+          if-no-files-found: warn
           retention-days: 14
+
+      - name: Enforce clean lint
+        if: always() && steps.verify.outputs.lint_status != '0'
+        shell: bash
+        run: |
+          echo 'Android lint reported errors. See the uploaded lint report artifact.'
+          exit 1
