@@ -1,0 +1,134 @@
+name: Publish signed ScreenSpan release
+
+on:
+  push:
+    branches:
+      - 'release/v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: screenspan-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Check out release branch
+        uses: actions/checkout@v4
+
+      - name: Validate release version and signing secret
+        shell: bash
+        env:
+          SCREENSPAN_KEYSTORE_PASSWORD: ${{ secrets.SCREENSPAN_KEYSTORE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#release/v}"
+          [[ "$GITHUB_REF_NAME" == release/v* ]]
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [ -n "$SCREENSPAN_KEYSTORE_PASSWORD" ] || {
+            echo 'Missing repository secret SCREENSPAN_KEYSTORE_PASSWORD.' >&2
+            exit 1
+          }
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "TAG=v$VERSION" >> "$GITHUB_ENV"
+
+      - name: Reconstruct verified ScreenSpan source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat source/ScreenSpan-source-v0.1.0.zip.b64.part-* | tr -d '\r\n' | base64 --decode > /tmp/ScreenSpan-source-v0.1.0.zip
+          echo 'f7a928bc66e1482367fbcb8fa160ae711f08a83b1a8530d8c5ee7669c5501c85  /tmp/ScreenSpan-source-v0.1.0.zip' | sha256sum --check
+          mkdir -p /tmp/screenspan-release
+          unzip -q /tmp/ScreenSpan-source-v0.1.0.zip -d /tmp/screenspan-release
+
+          cat source-v0.2/fixed/chunk-*.b64 | tr -d '\r\n' | base64 --decode > /tmp/ScreenSpan-v0.2-overlay.tar.gz
+          echo 'c79ca9dcd81cfecdce89adb87ce0ead0bf04a4cb164f08c6fd1bd5e983a2ac37  /tmp/ScreenSpan-v0.2-overlay.tar.gz' | sha256sum --check
+          tar -xzf /tmp/ScreenSpan-v0.2-overlay.tar.gz -C /tmp/screenspan-release/screenspan
+
+          for patch_file in "$GITHUB_WORKSPACE"/patches-v0.2/*.patch; do
+            [ -e "$patch_file" ] || continue
+            patch -d /tmp/screenspan-release/screenspan -p1 --forward < "$patch_file"
+          done
+
+          cat source-v0.3/chunk-*.b64 | tr -d '\r\n' | base64 --decode > /tmp/ScreenSpan-v0.3-overlay.tar.gz
+          echo '2b2ccd9e878ad9606c6e711dc3cd7b7e3add48f85a3a2a3fc8bb717146ab763e  /tmp/ScreenSpan-v0.3-overlay.tar.gz' | sha256sum --check
+          tar -xzf /tmp/ScreenSpan-v0.3-overlay.tar.gz -C /tmp/screenspan-release/screenspan
+
+          for patch_file in "$GITHUB_WORKSPACE"/patches-v0.3/*.patch; do
+            [ -e "$patch_file" ] || continue
+            patch -d /tmp/screenspan-release/screenspan -p1 --forward < "$patch_file"
+          done
+
+          while IFS= read -r obsolete; do
+            [ -n "$obsolete" ] || continue
+            rm -f "/tmp/screenspan-release/screenspan/$obsolete"
+          done < "$GITHUB_WORKSPACE/source-v0.3/remove-obsolete-files.txt"
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android platform
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager 'platform-tools' 'platforms;android-36' 'build-tools;36.0.0'
+
+      - name: Set up Gradle 9.5
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.5.0'
+
+      - name: Test, lint, sign and verify release
+        working-directory: /tmp/screenspan-release/screenspan
+        shell: bash
+        env:
+          SCREENSPAN_KEYSTORE_PASSWORD: ${{ secrets.SCREENSPAN_KEYSTORE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          gradle test :app:lintRelease :app:assembleRelease --stacktrace
+
+          APK="$GITHUB_WORKSPACE/ScreenSpan-v${VERSION}.apk"
+          SHA_FILE="$APK.sha256"
+          cp app/build/outputs/apk/release/app-release.apk "$APK"
+
+          AAPT="$ANDROID_HOME/build-tools/36.0.0/aapt"
+          APKSIGNER="$ANDROID_HOME/build-tools/36.0.0/apksigner"
+          "$AAPT" dump badging "$APK" | tee "$GITHUB_WORKSPACE/apk-badging.txt"
+          grep -F "package: name='com.rbt4.screenspan' versionName='${VERSION}'" "$GITHUB_WORKSPACE/apk-badging.txt"
+          "$AAPT" dump permissions "$APK" | tee "$GITHUB_WORKSPACE/apk-permissions.txt"
+          grep -F 'android.permission.REQUEST_INSTALL_PACKAGES' "$GITHUB_WORKSPACE/apk-permissions.txt"
+          "$APKSIGNER" verify --verbose --print-certs "$APK" | tee "$GITHUB_WORKSPACE/apk-signature.txt"
+          grep -Fi 'bc8cdea641992d72cfd0ed27d4a05b83130c6751b740a6347c58f57e5203287b' "$GITHUB_WORKSPACE/apk-signature.txt"
+          sha256sum "$(basename "$APK")" > "$SHA_FILE"
+          sha256sum --check "$SHA_FILE"
+
+      - name: Publish exact update assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          APK="ScreenSpan-v${VERSION}.apk"
+          SHA_FILE="$APK.sha256"
+          NOTES=$'Android-phone-only ScreenSpan release.\n\nFuture updates: open ScreenSpan on the phone and tap Update phone + Chromecast. Android requires one Install confirmation on each device. Existing calibration and settings are retained.'
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$APK" "$SHA_FILE" --clobber
+            gh release edit "$TAG" --title "ScreenSpan $VERSION" --notes "$NOTES" --latest
+          else
+            gh release create "$TAG" "$APK" "$SHA_FILE" \
+              --target "$GITHUB_SHA" \
+              --title "ScreenSpan $VERSION" \
+              --notes "$NOTES" \
+              --latest
+          fi
