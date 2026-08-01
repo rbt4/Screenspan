@@ -81,22 +81,34 @@ jobs:
         with:
           gradle-version: '9.5.0'
 
-      - name: Test and build test-signed APK
+      - name: Test, lint and build test-signed APK
         working-directory: /tmp/screenspan-v0.3/screenspan
         shell: bash
         run: |
           set -euo pipefail
-          gradle test :app:assembleRelease --stacktrace
+          gradle test :app:lintRelease :app:assembleRelease --stacktrace
           cp app/build/outputs/apk/release/app-release.apk "$GITHUB_WORKSPACE/ScreenSpan-v0.3.0-ci-test.apk"
-          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs "$GITHUB_WORKSPACE/ScreenSpan-v0.3.0-ci-test.apk"
-          sha256sum "$GITHUB_WORKSPACE/ScreenSpan-v0.3.0-ci-test.apk" | tee "$GITHUB_WORKSPACE/ScreenSpan-v0.3.0-ci-test.apk.sha256"
 
-      - name: Upload CI APK artifact
+          AAPT="$ANDROID_HOME/build-tools/36.0.0/aapt"
+          APKSIGNER="$ANDROID_HOME/build-tools/36.0.0/apksigner"
+          "$AAPT" dump badging "$GITHUB_WORKSPACE/ScreenSpan-v0.3.0-ci-test.apk" | tee "$GITHUB_WORKSPACE/apk-badging.txt"
+          grep -F "package: name='com.rbt4.screenspan' versionCode='3' versionName='0.3.0'" "$GITHUB_WORKSPACE/apk-badging.txt"
+          "$AAPT" dump permissions "$GITHUB_WORKSPACE/ScreenSpan-v0.3.0-ci-test.apk" | tee "$GITHUB_WORKSPACE/apk-permissions.txt"
+          grep -F 'android.permission.REQUEST_INSTALL_PACKAGES' "$GITHUB_WORKSPACE/apk-permissions.txt"
+          "$APKSIGNER" verify --verbose --print-certs "$GITHUB_WORKSPACE/ScreenSpan-v0.3.0-ci-test.apk" | tee "$GITHUB_WORKSPACE/apk-signature.txt"
+          sha256sum "$GITHUB_WORKSPACE/ScreenSpan-v0.3.0-ci-test.apk" | tee "$GITHUB_WORKSPACE/ScreenSpan-v0.3.0-ci-test.apk.sha256"
+          cp "$ANDROID_HOME/build-tools/36.0.0/lib/apksigner.jar" "$GITHUB_WORKSPACE/apksigner-36.0.0.jar"
+
+      - name: Upload CI verification artifact
         uses: actions/upload-artifact@v4
         with:
           name: ScreenSpan-v0.3.0-ci-test
           path: |
             ScreenSpan-v0.3.0-ci-test.apk
             ScreenSpan-v0.3.0-ci-test.apk.sha256
+            apk-badging.txt
+            apk-permissions.txt
+            apk-signature.txt
+            apksigner-36.0.0.jar
           if-no-files-found: error
           retention-days: 14
